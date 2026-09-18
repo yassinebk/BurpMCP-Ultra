@@ -81,6 +81,7 @@ items discovered during live validation, and project-maturity gaps.
 | **2.3.0** | minor | Smuggling | N8 HTTP request smuggling |
 | **2.4.0** | minor | Race | N10 single-packet / HTTP-2 race |
 | **2.5.0** | minor | Reporting | findings export (SARIF / Markdown), Collaborator UX |
+| **2.6.0** | minor | **Reliability & control** | compact 13-tool surface over 168 actions; central safety tiers; operator UI gates; fail-closed scope enforcement |
 | **3.0.0** | major | Architecture | async/concurrent tool execution, drop port 9877, Streamable-HTTP transport, M2/M4 tool renames (remove old aliases) |
 
 ---

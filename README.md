@@ -12,11 +12,11 @@ part of Burp Suite programmatically through AI agents.
 [![License](https://img.shields.io/badge/license-MIT-3fb950)](#license)
 [![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Professional-ff6633)](https://portswigger.net/burp)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.20-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org)
-[![MCP tools](https://img.shields.io/badge/MCP%20tools-168-8957e5)](#tools)
+[![MCP tools](https://img.shields.io/badge/MCP%20tools-13%20compact-8957e5)](#tools)
 [![Stars](https://img.shields.io/github/stars/Cy-S3c/BurpMCP-Ultra?style=flat&color=e3b341)](https://github.com/Cy-S3c/BurpMCP-Ultra/stargazers)
 [![Telegram](https://img.shields.io/badge/Telegram-%40D4RK__V0RT3X-2CA5E0?logo=telegram&logoColor=white)](https://t.me/D4RK_V0RT3X)
 
-**168 Tools** &bull; **8 Resources** &bull; **17 Event Types** &bull; Real-time Dashboard &bull; Hardened Localhost Security
+**13 Compact Tools / 168 Full Actions** &bull; **8 Resources** &bull; **17 Event Types** &bull; Real-time Dashboard &bull; Hardened Localhost Security
 
 [Quick Start](#quick-start) &bull;
 [Tools](#tools) &bull;
@@ -31,7 +31,8 @@ part of Burp Suite programmatically through AI agents.
 ---
 
 BurpMCP-Ultra is a native **Kotlin** Burp Suite extension with an embedded **MCP (Model
-Context Protocol)** server. It exposes Burp's Montoya API as 168 structured tools over a
+Context Protocol)** server. It exposes Burp's Montoya API through 12 compact routers plus
+on-demand capability discovery over a
 token-secured local SSE transport, so an AI agent can run proxy history analysis, active
 scans, fuzzing, race conditions, OOB testing, custom scan checks, and guided exploitation
 — all from natural language.
@@ -40,7 +41,7 @@ scans, fuzzing, race conditions, OOB testing, custom scan checks, and guided exp
 
 | | BurpMCP-Ultra | burp-ai-agent | PortSwigger Official |
 |---|:---:|:---:|:---:|
-| **MCP Tools** | **168** | 53 | 12 |
+| **Default MCP Tools** | **13 compact / 168 full actions** | 53 | 12 |
 | **Custom Scan Checks** | BCheck + Script | – | – |
 | **Guided Injection Probe** | SQLi / SSTI / LFI oracles | – | – |
 | **JWT Attacks** | alg:none, RS→HS, crack | – | – |
@@ -69,7 +70,7 @@ cd BurpMCP-Ultra
 ./gradlew shadowJar
 ```
 
-Output: `build/libs/burpmcp-ultra-2.3.1.jar` (~13 MB). A **JDK 17–21** must be installed —
+Output: `build/libs/burpmcp-ultra-2.6.0.jar` (~13 MB). A **JDK 17–21** must be installed —
 see [Building from Source](#building-from-source). Pre-built JARs are on the
 [Releases](https://github.com/Cy-S3c/BurpMCP-Ultra/releases) page.
 
@@ -123,8 +124,27 @@ Browse to **http://127.0.0.1:9878** for the real-time web dashboard.
 
 ## Tools
 
-**168 MCP tools** across 37 categories. Names are stable; the authoritative count is
-`server.tools.size`, surfaced in the Server tab.
+The default `compact` profile exposes 12 domain routers plus `burp_capabilities`.
+Call `burp_capabilities` with an action name to retrieve its exact argument schema.
+The original 168 individual tools remain available for compatibility by launching Burp with
+`BURPMCP_TOOL_PROFILE=full` or `-Dburpmcp.tool.profile=full`.
+
+| Compact router | Action families |
+|---|---|
+| `burp_proxy` | Proxy history, bounded live index, annotations, interception and rules |
+| `burp_http` | Sends, chains, fuzzing, races, cookie jar and traffic rules |
+| `burp_workbench` | Repeater, Intruder, Organizer, Comparer and Decoder |
+| `burp_scanner` | Scanner tasks, BChecks and script scan checks |
+| `burp_collaborator` | Collaborator clients, payloads and polling |
+| `burp_websocket` | WebSocket lifecycle and messages |
+| `burp_target` | Scope and site map |
+| `burp_research` | Analysis, recon, GraphQL, JWT, IDOR and guided probes |
+| `burp_events` / `burp_findings` / `burp_session` | Events, evidence and session handling |
+| `burp_local` | Read-only project and extension metadata |
+
+Low-value local utilities, generic preference/persistence access, Burp AI prompting and
+administrative configuration are omitted from the compact profile. They remain in `full` for
+compatibility. Category names below are the stable action names accepted by the routers.
 
 ### Proxy (27)
 | Tool | Description |
@@ -410,7 +430,11 @@ governed by **operator-only** controls the agent cannot change.
 - `mcp_scope_mode` — `off` / `warn` / `enforce`. Every live-request tool passes through a
   central **scope gate** (`http_*`, `auth_diff`, `api_import_openapi`, `recon_*`, `graphql_probe`,
   `cors_probe`, `access_control_sweep`, `injection_probe`).
-- `mcp_allow_destructive` — default **false**; blocks `burp_shutdown` and config import.
+- `mcp_allow_destructive` — default **false**; blocks deletes, clears, shutdown and config import.
+- `mcp_allow_exec` — default **false**; blocks actions that register or execute supplied code.
+- Set either gate under **BurpMCP-Ultra → Server → MCP Safety Policy**; changes take effect immediately.
+- Destructive and exec actions additionally require `confirm:true` through the compact routers.
+- Generic persistence tools cannot read or modify reserved `mcp_*` operator preferences.
 - **Append-only audit log** of security-relevant tool calls (`~/.burpmcp-ultra-audit.jsonl`).
 
 Additional defenses: ReDoS-safe regex, CRLF header validation, and response/WebSocket size caps.
@@ -532,7 +556,7 @@ Builds the JAR, optionally configures Caddy, and prints the MCP config to add.
 |  |                                             |  |
 |  |  Montoya API --> Bridge Layer (32 bridges)  |  |
 |  |       |                |                    |  |
-|  |  Event Bus    Tool Registry (168 tools)     |  |
+|  |  Event Bus    Compact Routers (13 tools)    |  |
 |  |       |                |                    |  |
 |  |       +------- MCP Server Core -------+     |  |
 |  |               (Kotlin SDK 0.8.3)      |     |  |
@@ -582,7 +606,7 @@ cd BurpMCP-Ultra
 # Gradle auto-selects an installed JDK 17 for the build daemon, so this works even if your
 # default `java` is Burp's Java 25. If no JDK 17 is discoverable, install one (or set JAVA_HOME).
 ./gradlew shadowJar
-# Output: build/libs/burpmcp-ultra-2.3.1.jar
+# Output: build/libs/burpmcp-ultra-2.6.0.jar
 ```
 
 **Windows (PowerShell / cmd)**
@@ -592,7 +616,7 @@ cd BurpMCP-Ultra
 :: Gradle auto-selects an installed JDK 17 for the build daemon, so this works even if your
 :: default java is Burp's Java 25. If no JDK 17 is discoverable, install one (or set JAVA_HOME).
 gradlew.bat shadowJar
-:: Output: build\libs\burpmcp-ultra-2.3.1.jar
+:: Output: build\libs\burpmcp-ultra-2.6.0.jar
 ```
 
 > If no JDK 17 is found, Gradle fails with a clear "no compatible daemon JVM" error instead of
@@ -609,7 +633,7 @@ BurpMCP-Ultra/
 ├── src/main/kotlin/com/burpmcp/ultra/
 │   ├── core/                     # Extension entry point + helpers
 │   ├── bridge/                   # 32 Montoya API bridges
-│   ├── tools/                    # 37 tool category modules (168 tools)
+│   ├── tools/                    # 37 category modules (168 full-profile actions)
 │   ├── safety/                   # Scope gate, action policy, ReDoS-safe regex
 │   ├── transport/                # MCP server + dashboard + security
 │   ├── events/                   # Unified event bus

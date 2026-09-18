@@ -41,8 +41,16 @@ human operator can.
 | Preference | Default | Effect |
 |---|---|---|
 | `mcp_scope_mode` | `warn` | Gates outbound HTTP against Burp's target scope (`off`/`warn`/`enforce`). |
-| `mcp_allow_destructive` | `false` | Blocks `burp_shutdown`, project/user config import until enabled. |
+| `mcp_allow_destructive` | `false` | Blocks destructive deletes, clears, shutdown and configuration import until enabled. |
+| `mcp_allow_exec` | `false` | Blocks tools that register or execute operator/model-supplied code. |
 | `mcp_allow_remote_bind` | `false` | **Must be `true` for any non-loopback bind to be honored** (see below). |
+
+Set the destructive and execution gates under **BurpMCP-Ultra → Server → MCP Safety Policy**. Enabling either gate requires operator confirmation and takes effect immediately.
+
+The compact routers require `confirm:true` in addition to the relevant operator preference.
+Generic persistence tools reject every reserved `mcp_*` key, so an MCP client cannot use them
+to change policy, transport, scope, or authentication settings. Scope `enforce` mode fails closed
+if Burp cannot evaluate the target URL.
 
 A durable audit trail of security-relevant tool calls is written to `~/.burpmcp-ultra-audit.jsonl`.
 
