@@ -22,6 +22,7 @@ class BurpMcpUltraExtension : BurpExtension {
     private lateinit var eventBus: EventBus
     private lateinit var stateManager: StateManager
     private lateinit var uiTab: BurpMcpUltraTab
+    private lateinit var bridges: BridgeFactory.Bridges
 
     override fun initialize(api: MontoyaApi) {
         this.api = api
@@ -43,6 +44,7 @@ class BurpMcpUltraExtension : BurpExtension {
             try { if (::uiTab.isInitialized) uiTab.dispose() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: uiTab dispose failed: ${e.message}") }
             try { if (::dashboardServer.isInitialized) dashboardServer.stop() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: dashboard stop failed: ${e.message}") }
             try { if (::serverManager.isInitialized) serverManager.stop() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: server stop failed: ${e.message}") }
+            try { if (::bridges.isInitialized) bridges.proxy.close() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: proxy index close failed: ${e.message}") }
             try { eventBus.clear() } catch (_: Exception) {}
             try { stateManager.cleanup() } catch (_: Exception) {}
             api.logging().logToOutput("BurpMCP-Ultra: Extension unloaded")
@@ -114,7 +116,7 @@ class BurpMcpUltraExtension : BurpExtension {
         val bindHost = bindDecision.effectiveHost
 
         // Create all bridge instances via factory
-        val bridges = BridgeFactory.createAll(api, eventBus, stateManager)
+        bridges = BridgeFactory.createAll(api, eventBus, stateManager)
 
         // Initialize the MCP + dashboard servers. From here on a socket may be bound, so if ANY
         // later init step throws we must stop them (see the early unload handler above) — otherwise

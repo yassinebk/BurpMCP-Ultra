@@ -471,7 +471,7 @@ class BurpMcpUltraTab(
                 val method = if (methodCombo.selectedIndex == 0) null else methodCombo.selectedItem as String
                 val status = statusField.text.trim().toIntOrNull()
                 val count = countField.text.trim().toIntOrNull() ?: 100
-                val result = bridges.proxy.getHistory(0, count, host, method, status, null, scopeCheck.isSelected, true, true, null)
+                val result = bridges.proxy.getHistorySummary(null, null, count, host, method, status, scopeCheck.isSelected)
                 if (showBridgeError(result, "Fetch proxy history")) return@SwingWorker
                 val items = result["items"]?.jsonArray ?: JsonArray(emptyList())
                 SwingUtilities.invokeLater {
@@ -484,12 +484,12 @@ class BurpMcpUltraTab(
                         val obj = item.jsonObject
                         proxyHistoryCache.add(obj)
                         proxyTableModel.addRow(arrayOf<Any?>(
-                            obj["index"]?.jsonPrimitive?.intOrNull ?: 0,
+                            obj["id"]?.jsonPrimitive?.intOrNull ?: 0,
                             obj["method"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["url"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["host"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["status_code"]?.jsonPrimitive?.intOrNull as Int?,
-                            obj["response_mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
+                            obj["mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["response_length"]?.jsonPrimitive?.intOrNull ?: 0
                         ))
                     }
@@ -497,13 +497,13 @@ class BurpMcpUltraTab(
             }
         }
 
-        // Search action. searchHistory returns the same "items" array shape as
-        // getHistory (plus total_matches) — NOT a "matches" key; reading the old
-        // key silently emptied the table for every search.
+        // Search action uses the bounded path so a large project cannot pin the UI.
         searchBtn.addActionListener {
             val pattern = searchField.text.trim(); if (pattern.isEmpty()) return@addActionListener
             SwingWorker(api, "Searching proxy history...") {
-                val result = bridges.proxy.searchHistory(pattern, "both", false, 200, scopeCheck.isSelected, true, true, null)
+                val result = bridges.proxy.searchHistoryBounded(
+                    pattern, "both", false, null, null, 2_000, 200, 5_000, scopeCheck.isSelected
+                )
                 if (showBridgeError(result, "Search proxy history")) return@SwingWorker
                 val items = result["items"]?.jsonArray ?: JsonArray(emptyList())
                 SwingUtilities.invokeLater {
@@ -513,12 +513,12 @@ class BurpMcpUltraTab(
                         val obj = item.jsonObject
                         proxyHistoryCache.add(obj)
                         proxyTableModel.addRow(arrayOf<Any?>(
-                            obj["index"]?.jsonPrimitive?.intOrNull ?: 0,
+                            obj["id"]?.jsonPrimitive?.intOrNull ?: 0,
                             obj["method"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["url"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["host"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["status_code"]?.jsonPrimitive?.intOrNull as Int?,
-                            obj["response_mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
+                            obj["mime_type"]?.jsonPrimitive?.contentOrNull ?: "",
                             obj["response_length"]?.jsonPrimitive?.intOrNull ?: 0
                         ))
                     }
@@ -539,16 +539,27 @@ class BurpMcpUltraTab(
         val item = proxyHistoryCache[mr]
         try {
             val reqStr = item["request"]?.jsonPrimitive?.contentOrNull
-            if (reqStr != null) {
-                val host = item["host"]?.jsonPrimitive?.contentOrNull ?: ""
-                val port = item["port"]?.jsonPrimitive?.intOrNull ?: 443
-                // The serializer emits "secure" — reading the old "is_tls" key made every
-                // miss default to TLS, so plain-HTTP items rendered (and were sent to
-                // Repeater/Intruder) as https.
-                val tls = item["secure"]?.jsonPrimitive?.booleanOrNull ?: (port == 443)
-                val service = burp.api.montoya.http.HttpService.httpService(host, port, tls)
-                proxyRequestEditor.setRequest(HttpRequest.httpRequest(service, reqStr))
+            if (reqStr == null) {
+                val id = item["id"]?.jsonPrimitive?.intOrNull ?: return
+                SwingWorker(api, "Loading proxy history entry...") {
+                    val loaded = bridges.proxy.getHistoryEntry(id, 200_000)["item"]?.jsonObject ?: return@SwingWorker
+                    SwingUtilities.invokeLater {
+                        if (mr < proxyHistoryCache.size) {
+                            proxyHistoryCache[mr] = loaded
+                            showProxyDetail()
+                        }
+                    }
+                }
+                return
             }
+            val host = item["host"]?.jsonPrimitive?.contentOrNull ?: ""
+            val port = item["port"]?.jsonPrimitive?.intOrNull ?: 443
+            // The serializer emits "secure" — reading the old "is_tls" key made every
+            // miss default to TLS, so plain-HTTP items rendered (and were sent to
+            // Repeater/Intruder) as https.
+            val tls = item["secure"]?.jsonPrimitive?.booleanOrNull ?: (port == 443)
+            val service = burp.api.montoya.http.HttpService.httpService(host, port, tls)
+            proxyRequestEditor.setRequest(HttpRequest.httpRequest(service, reqStr))
         } catch (_: Exception) {}
         try {
             val respStr = item["response"]?.jsonPrimitive?.contentOrNull

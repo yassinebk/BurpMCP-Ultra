@@ -2,6 +2,7 @@ package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
 import com.burpmcp.ultra.core.BodyText
+import com.burpmcp.ultra.core.BoundedHistorySearch
 import com.burpmcp.ultra.core.ProxyHistorySearch
 import com.burpmcp.ultra.core.StatusCodeRange
 import com.burpmcp.ultra.core.HighlightColorName
@@ -28,8 +29,17 @@ import com.burpmcp.ultra.safety.HeaderSafety
 import com.burpmcp.ultra.safety.SafeRegex
 import com.burpmcp.ultra.state.ProxyRule
 import com.burpmcp.ultra.state.StateManager
+import com.burpmcp.ultra.state.LiveHistoryIndex
+import com.burpmcp.ultra.state.AsyncSearchJobs
+import com.burpmcp.ultra.state.HistoryCapturePolicy
+import com.burpmcp.ultra.state.PersistentHistoryStore
 import kotlinx.serialization.json.*
 import java.time.Instant
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.Pattern
 
 /**
@@ -45,6 +55,30 @@ class ProxyBridge(
     private val eventBus: EventBus,
     private val stateManager: StateManager
 ) {
+    private val liveHistoryIndex = LiveHistoryIndex()
+    private val preferences = api.persistence().preferences()
+    private val persistentHistoryStore = PersistentHistoryStore.forProject(
+        try { api.project().name() } catch (_: Exception) { "" }
+    )
+    private val searchJobs = AsyncSearchJobs()
+    private val droppedPersistenceWrites = AtomicLong(0)
+    private val persistenceExecutor = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(2_000),
+        { runnable -> Thread(runnable, "burpmcp-history-store").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy()
+    )
+    @Volatile private var persistenceEnabled = preferenceBoolean("mcp_persist_proxy_index", false)
+    @Volatile private var capturePolicy = loadCapturePolicy()
+
+    init {
+        if (persistenceEnabled) {
+            try {
+                persistentHistoryStore.load(20_000).forEach(liveHistoryIndex::restore)
+            } catch (e: Exception) {
+                api.logging().logToError("BurpMCP-Ultra: persistent proxy index restore failed: ${e.message}")
+            }
+        }
+    }
 
     // ---------------------------------------------------------------
     // History retrieval
@@ -197,6 +231,344 @@ class ProxyBridge(
                     add(serializeHistoryItem(item, includeRequest, includeResponse, maxResponseLength ?: 200_000))
                 }
             })
+        }
+    }
+
+    /**
+     * Returns a compact, newest-first history page without serializing message bodies.
+     * [beforeId] and [afterId] are exclusive cursors over Burp's stable history ids.
+     */
+    fun getHistorySummary(
+        beforeId: Int?,
+        afterId: Int?,
+        limit: Int,
+        host: String?,
+        method: String?,
+        statusCode: Int?,
+        inScopeOnly: Boolean
+    ): JsonObject {
+        val effectiveLimit = BoundedHistorySearch.limit(limit)
+        val history = api.proxy().history()
+        val selected = ArrayList<ProxyHttpRequestResponse>(effectiveLimit + 1)
+
+        for (item in history.asReversed()) {
+            if (!BoundedHistorySearch.inWindow(item.id(), beforeId, afterId)) continue
+            if (host != null && !item.host().contains(host, ignoreCase = true)) continue
+            if (method != null && !item.method().equals(method, ignoreCase = true)) continue
+            if (statusCode != null && historyStatus(item) != statusCode) continue
+            if (inScopeOnly && !item.request().isInScope()) continue
+            selected.add(item)
+            if (selected.size > effectiveLimit) break
+        }
+
+        val hasMore = selected.size > effectiveLimit
+        val page = if (hasMore) selected.subList(0, effectiveLimit) else selected
+        return buildJsonObject {
+            put("history_size", history.size)
+            put("returned", page.size)
+            put("has_more", hasMore)
+            page.lastOrNull()?.let { put("next_before_id", it.id()) }
+            put("items", buildJsonArray {
+                page.forEach { add(serializeHistorySummary(it)) }
+            })
+        }
+    }
+
+    /** Retrieves exactly one history item by Burp id. */
+    fun getHistoryEntry(id: Int, maxMessageLength: Int?): JsonObject {
+        val item = api.proxy().history().firstOrNull { it.id() == id }
+            ?: return buildJsonObject {
+                put("error", "Proxy history entry $id was not found")
+                put("id", id)
+            }
+
+        return buildJsonObject {
+            put("item", serializeHistoryItem(
+                item = item,
+                includeRequest = true,
+                includeResponse = true,
+                maxResponseLength = maxMessageLength ?: 200_000
+            ))
+        }
+    }
+
+    /**
+     * Searches a bounded, newest-first history window and returns only metadata plus snippets.
+     * Unlike [searchHistory], work stops at explicit scan, match, and wall-clock limits.
+     */
+    fun searchHistoryBounded(
+        pattern: String,
+        searchIn: String,
+        caseSensitive: Boolean,
+        beforeId: Int?,
+        afterId: Int?,
+        scanLimit: Int,
+        maxResults: Int,
+        timeBudgetMs: Long,
+        inScopeOnly: Boolean
+    ): JsonObject {
+        if (pattern.length > BoundedHistorySearch.MAX_PATTERN_LENGTH) {
+            return buildJsonObject {
+                put("error", "Pattern exceeds ${BoundedHistorySearch.MAX_PATTERN_LENGTH} characters")
+            }
+        }
+        try {
+            SafeRegex.compile(pattern, ignoreCase = !caseSensitive)
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Invalid regex: ${e.message ?: "syntax error"}") }
+        }
+
+        val effectiveScanLimit = BoundedHistorySearch.scanLimit(scanLimit)
+        val effectiveMaxResults = maxResults.coerceIn(1, 200)
+        val effectiveBudgetMs = BoundedHistorySearch.timeBudgetMs(timeBudgetMs)
+        val deadlineNs = System.nanoTime() + effectiveBudgetMs * 1_000_000
+        val targets = ProxyHistorySearch.targets(searchIn)
+        val iterator = api.proxy().history().asReversed().asSequence()
+            .filter { BoundedHistorySearch.inWindow(it.id(), beforeId, afterId) }
+            .iterator()
+
+        var scanned = 0
+        var matchCount = 0
+        var lastScannedId: Int? = null
+        var stoppedReason = "end_of_history"
+        val matches = buildJsonArray {
+            while (iterator.hasNext()) {
+                if (scanned >= effectiveScanLimit) {
+                    stoppedReason = "scan_limit"
+                    break
+                }
+                if (System.nanoTime() >= deadlineNs) {
+                    stoppedReason = "time_budget"
+                    break
+                }
+
+                val item = iterator.next()
+                scanned++
+                lastScannedId = item.id()
+                if (inScopeOnly && !item.request().isInScope()) continue
+
+                val match = findHistoryMatch(item, pattern, !caseSensitive, targets) ?: continue
+                add(buildJsonObject {
+                    serializeHistorySummaryInto(this, item)
+                    put("match_location", match.location)
+                    put("snippet", match.snippet)
+                })
+                matchCount++
+                if (matchCount >= effectiveMaxResults) {
+                    stoppedReason = "match_limit"
+                    break
+                }
+            }
+        }
+
+        val hasMore = iterator.hasNext()
+        return buildJsonObject {
+            put("pattern", pattern)
+            put("search_in", searchIn)
+            put("scanned", scanned)
+            put("returned", matches.size)
+            put("has_more", hasMore)
+            put("stopped_reason", if (hasMore) stoppedReason else "end_of_history")
+            if (hasMore && lastScannedId != null) put("next_before_id", lastScannedId)
+            put("items", matches)
+        }
+    }
+
+    fun getLiveIndexSummary(beforeMessageId: Int?, limit: Int): JsonObject {
+        val effectiveLimit = BoundedHistorySearch.limit(limit)
+        val selected = liveHistoryIndex.newest(beforeMessageId, effectiveLimit + 1)
+        val hasMore = selected.size > effectiveLimit
+        val page = if (hasMore) selected.subList(0, effectiveLimit) else selected
+        val stats = liveHistoryIndex.stats()
+        return buildJsonObject {
+            put("source", "live_index")
+            put("entries", stats.entries)
+            put("stored_bytes", stats.storedBytes)
+            put("returned", page.size)
+            put("has_more", hasMore)
+            page.lastOrNull()?.let { put("next_before_message_id", it.messageId) }
+            put("items", buildJsonArray { page.forEach { add(serializeLiveEntry(it, includeMessages = false)) } })
+        }
+    }
+
+    fun getLiveIndexEntry(messageId: Int): JsonObject {
+        val entry = liveHistoryIndex.get(messageId)
+            ?: return buildJsonObject {
+                put("error", "Live index entry $messageId was not found or has been evicted")
+                put("message_id", messageId)
+            }
+        return buildJsonObject { put("item", serializeLiveEntry(entry, includeMessages = true)) }
+    }
+
+    fun searchLiveIndex(
+        pattern: String,
+        searchIn: String,
+        caseSensitive: Boolean,
+        beforeMessageId: Int?,
+        scanLimit: Int,
+        maxResults: Int,
+        timeBudgetMs: Long
+    ): JsonObject {
+        if (pattern.length > BoundedHistorySearch.MAX_PATTERN_LENGTH) {
+            return buildJsonObject { put("error", "Pattern exceeds ${BoundedHistorySearch.MAX_PATTERN_LENGTH} characters") }
+        }
+        try {
+            SafeRegex.compile(pattern, ignoreCase = !caseSensitive)
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Invalid regex: ${e.message ?: "syntax error"}") }
+        }
+
+        val effectiveScanLimit = BoundedHistorySearch.scanLimit(scanLimit)
+        val effectiveMaxResults = maxResults.coerceIn(1, 200)
+        val deadlineNs = System.nanoTime() + BoundedHistorySearch.timeBudgetMs(timeBudgetMs) * 1_000_000
+        val targets = ProxyHistorySearch.targets(searchIn)
+        val candidates = liveHistoryIndex.newest(beforeMessageId, effectiveScanLimit)
+        var scanned = 0
+        var matchCount = 0
+        var lastScannedId: Int? = null
+        val matches = buildJsonArray {
+            for (entry in candidates) {
+                if (Thread.currentThread().isInterrupted) break
+                if (System.nanoTime() >= deadlineNs) break
+                scanned++
+                lastScannedId = entry.messageId
+                val match = findLiveMatch(entry, pattern, !caseSensitive, targets) ?: continue
+                add(buildJsonObject {
+                    serializeLiveEntryInto(this, entry, includeMessages = false)
+                    put("match_location", match.location)
+                    put("snippet", match.snippet)
+                })
+                matchCount++
+                if (matchCount >= effectiveMaxResults) break
+            }
+        }
+        val hasMore = scanned < candidates.size || candidates.size >= effectiveScanLimit || matches.size >= effectiveMaxResults
+        return buildJsonObject {
+            put("source", "live_index")
+            put("scanned", scanned)
+            put("returned", matches.size)
+            put("has_more", hasMore)
+            if (hasMore && lastScannedId != null) put("next_before_message_id", lastScannedId)
+            put("items", matches)
+        }
+    }
+
+    fun getLiveIndexStats(): JsonObject {
+        val stats = liveHistoryIndex.stats()
+        val disk = persistentHistoryStore.stats()
+        return buildJsonObject {
+            put("entries", stats.entries)
+            put("stored_bytes", stats.storedBytes)
+            put("max_entries", stats.maxEntries)
+            put("max_bytes", stats.maxBytes)
+            put("scope", if (persistenceEnabled) "Current project sidecar plus newly observed traffic" else "Traffic observed after BurpMCP-Ultra loaded")
+            put("persistence_enabled", persistenceEnabled)
+            put("persistent_path", disk.path)
+            put("persistent_bytes", disk.bytes)
+            put("persistent_max_bytes", disk.maxBytes)
+            put("pending_persistence_writes", persistenceExecutor.queue.size)
+            put("dropped_persistence_writes", droppedPersistenceWrites.get())
+        }
+    }
+
+    fun clearLiveIndex(): JsonObject = buildJsonObject {
+        put("cleared", liveHistoryIndex.clear())
+        put("scope", "live_index_only")
+        put("burp_proxy_history_modified", false)
+    }
+
+    fun getIndexPolicy(): JsonObject = buildJsonObject {
+        val policy = capturePolicy
+        put("capture_enabled", policy.enabled)
+        put("in_scope_only", policy.inScopeOnly)
+        put("include_hosts", buildJsonArray { policy.includeHosts.forEach(::add) })
+        put("exclude_hosts", buildJsonArray { policy.excludeHosts.forEach(::add) })
+        put("exclude_extensions", buildJsonArray { policy.excludeExtensions.sorted().forEach(::add) })
+        put("persistence_enabled", persistenceEnabled)
+        put("persistent_redaction", "authorization, proxy-authorization, cookie, set-cookie, x-api-key, password and token values")
+    }
+
+    fun configureIndexPolicy(
+        captureEnabled: Boolean?,
+        inScopeOnly: Boolean?,
+        includeHosts: List<String>?,
+        excludeHosts: List<String>?,
+        excludeExtensions: List<String>?,
+        persist: Boolean?
+    ): JsonObject {
+        val old = capturePolicy
+        val updated = HistoryCapturePolicy.normalized(
+            enabled = captureEnabled ?: old.enabled,
+            inScopeOnly = inScopeOnly ?: old.inScopeOnly,
+            includeHosts = includeHosts ?: old.includeHosts,
+            excludeHosts = excludeHosts ?: old.excludeHosts,
+            excludeExtensions = excludeExtensions ?: old.excludeExtensions
+        )
+        capturePolicy = updated
+        preferences.setBoolean("mcp_proxy_index_capture_enabled", updated.enabled)
+        preferences.setBoolean("mcp_proxy_index_scope_only", updated.inScopeOnly)
+        preferences.setString("mcp_proxy_index_include_hosts", updated.includeHosts.joinToString(","))
+        preferences.setString("mcp_proxy_index_exclude_hosts", updated.excludeHosts.joinToString(","))
+        preferences.setString("mcp_proxy_index_exclude_extensions", updated.excludeExtensions.joinToString(","))
+
+        if (persist != null && persist != persistenceEnabled) {
+            persistenceEnabled = persist
+            preferences.setBoolean("mcp_persist_proxy_index", persist)
+            if (persist) {
+                submitPersistence {
+                    persistentHistoryStore.compact(liveHistoryIndex.newest(limit = 20_000).asReversed(), force = true)
+                }
+            }
+        }
+        return getIndexPolicy()
+    }
+
+    fun clearPersistentIndex(): JsonObject {
+        val deleted = try { persistentHistoryStore.clear() } catch (_: Exception) { false }
+        return buildJsonObject {
+            put("deleted", deleted)
+            put("scope", "extension_sidecar_only")
+            put("burp_proxy_history_modified", false)
+        }
+    }
+
+    fun startLiveIndexSearchJob(
+        pattern: String,
+        searchIn: String,
+        caseSensitive: Boolean,
+        beforeMessageId: Int?,
+        scanLimit: Int,
+        maxResults: Int,
+        timeBudgetMs: Long
+    ): JsonObject {
+        val id = searchJobs.submit {
+            searchLiveIndex(pattern, searchIn, caseSensitive, beforeMessageId, scanLimit, maxResults, timeBudgetMs)
+        }
+        return buildJsonObject { put("job_id", id); put("status", "queued") }
+    }
+
+    fun getSearchJob(id: String): JsonObject {
+        val job = searchJobs.get(id) ?: return buildJsonObject { put("error", "Search job $id was not found") }
+        return buildJsonObject {
+            put("job_id", job.id)
+            put("status", job.status)
+            put("created_at", job.createdAt)
+            job.result?.let { put("result", it) }
+            job.error?.let { put("error", it) }
+        }
+    }
+
+    fun cancelSearchJob(id: String): JsonObject = buildJsonObject {
+        put("job_id", id)
+        put("cancelled", searchJobs.cancel(id))
+    }
+
+    fun close() {
+        searchJobs.close()
+        persistenceExecutor.shutdown()
+        try { persistenceExecutor.awaitTermination(2, TimeUnit.SECONDS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        if (persistenceEnabled) {
+            try { persistentHistoryStore.compact(liveHistoryIndex.newest(limit = 20_000).asReversed(), force = true) } catch (_: Exception) { }
         }
     }
 
@@ -378,6 +750,19 @@ class ProxyBridge(
     fun createRequestHandler(): ProxyRequestHandler {
         return object : ProxyRequestHandler {
             override fun handleRequestReceived(interceptedRequest: InterceptedRequest): ProxyRequestReceivedAction {
+                val policy = capturePolicy
+                if (policy.accepts(interceptedRequest.httpService().host(), interceptedRequest.url(), interceptedRequest.isInScope())) {
+                    liveHistoryIndex.recordRequest(
+                        messageId = interceptedRequest.messageId(),
+                        method = interceptedRequest.method(),
+                        url = interceptedRequest.url(),
+                        host = interceptedRequest.httpService().host(),
+                        port = interceptedRequest.httpService().port(),
+                        secure = interceptedRequest.httpService().secure(),
+                        rawRequest = cappedMessageText(interceptedRequest.toByteArray())
+                    )
+                    persistSnapshot(interceptedRequest.messageId())
+                }
                 // Emit event for every request passing through the proxy
                 emitRequestEvent(interceptedRequest)
 
@@ -458,6 +843,13 @@ class ProxyBridge(
     fun createResponseHandler(): ProxyResponseHandler {
         return object : ProxyResponseHandler {
             override fun handleResponseReceived(interceptedResponse: InterceptedResponse): ProxyResponseReceivedAction {
+                liveHistoryIndex.recordResponse(
+                    messageId = interceptedResponse.messageId(),
+                    rawResponse = cappedMessageText(interceptedResponse.toByteArray()),
+                    statusCode = interceptedResponse.statusCode().toInt(),
+                    mimeType = try { interceptedResponse.mimeType().name } catch (_: Exception) { null }
+                )
+                persistSnapshot(interceptedResponse.messageId())
                 // Emit event for every response passing through the proxy
                 emitResponseEvent(interceptedResponse)
 
@@ -815,6 +1207,145 @@ class ProxyBridge(
                 }
             }
         }
+    }
+
+    private fun serializeHistorySummary(item: ProxyHttpRequestResponse): JsonObject =
+        buildJsonObject { serializeHistorySummaryInto(this, item) }
+
+    private fun serializeHistorySummaryInto(builder: JsonObjectBuilder, item: ProxyHttpRequestResponse) {
+        builder.put("id", item.id())
+        builder.put("method", item.method())
+        builder.put("host", item.host())
+        builder.put("port", item.port())
+        builder.put("secure", item.secure())
+        builder.put("path", item.path())
+        builder.put("url", item.url())
+        builder.put("has_response", item.hasResponse())
+        historyStatus(item)?.let { builder.put("status_code", it) }
+        if (item.hasResponse()) {
+            try {
+                builder.put("response_length", item.response().body().length())
+                builder.put("mime_type", item.response().mimeType().name)
+            } catch (_: Exception) { }
+        }
+        try { item.time()?.let { builder.put("time", it.toString()) } } catch (_: Exception) { }
+    }
+
+    private data class BoundedMatch(val location: String, val snippet: String)
+
+    private fun serializeLiveEntry(entry: LiveHistoryIndex.Entry, includeMessages: Boolean): JsonObject =
+        buildJsonObject { serializeLiveEntryInto(this, entry, includeMessages) }
+
+    private fun serializeLiveEntryInto(
+        builder: JsonObjectBuilder,
+        entry: LiveHistoryIndex.Entry,
+        includeMessages: Boolean
+    ) {
+        builder.put("message_id", entry.messageId)
+        builder.put("method", entry.method)
+        builder.put("url", entry.url)
+        builder.put("host", entry.host)
+        builder.put("port", entry.port)
+        builder.put("secure", entry.secure)
+        builder.put("observed_at", entry.observedAt)
+        entry.statusCode?.let { builder.put("status_code", it) }
+        entry.mimeType?.let { builder.put("mime_type", it) }
+        builder.put("request_truncated", entry.requestTruncated)
+        builder.put("response_truncated", entry.responseTruncated)
+        if (includeMessages) {
+            builder.put("request", BodyText.stripLoneSurrogates(entry.request))
+            entry.response?.let { builder.put("response", BodyText.stripLoneSurrogates(it)) }
+        }
+    }
+
+    private fun findLiveMatch(
+        entry: LiveHistoryIndex.Entry,
+        pattern: String,
+        ignoreCase: Boolean,
+        targets: ProxyHistorySearch.Targets
+    ): BoundedMatch? {
+        fun find(location: String, text: String): BoundedMatch? {
+            val result = SafeRegex.find(pattern, text, ignoreCase, maxInputLen = 64_000, timeoutMs = 50)
+                ?: return null
+            return BoundedMatch(location, BoundedHistorySearch.snippet(text, result.range.first, result.range.last + 1))
+        }
+        if (targets.url) find("url", entry.url)?.let { return it }
+        if (targets.request) find("request", entry.request)?.let { return it }
+        if (targets.response) entry.response?.let { find("response", it) }?.let { return it }
+        return null
+    }
+
+    private fun findHistoryMatch(
+        item: ProxyHttpRequestResponse,
+        pattern: String,
+        ignoreCase: Boolean,
+        targets: ProxyHistorySearch.Targets
+    ): BoundedMatch? {
+        fun find(location: String, text: String): BoundedMatch? {
+            val result = SafeRegex.find(
+                pattern = pattern,
+                input = text,
+                ignoreCase = ignoreCase,
+                maxInputLen = 500_000,
+                timeoutMs = 50
+            ) ?: return null
+            return BoundedMatch(
+                location,
+                BoundedHistorySearch.snippet(text, result.range.first, result.range.last + 1)
+            )
+        }
+
+        if (targets.url) find("url", item.url())?.let { return it }
+        if (targets.request) find("request", cappedMessageText(item.request().toByteArray(), 500_000))?.let { return it }
+        if (targets.response && item.hasResponse()) {
+            find("response", cappedMessageText(item.response().toByteArray(), 500_000))?.let { return it }
+        }
+        return null
+    }
+
+    private fun persistSnapshot(messageId: Int) {
+        if (!persistenceEnabled) return
+        val snapshot = liveHistoryIndex.get(messageId) ?: return
+        submitPersistence {
+            if (!persistenceEnabled) return@submitPersistence
+            try {
+                persistentHistoryStore.append(snapshot)
+                persistentHistoryStore.compact(liveHistoryIndex.newest(limit = 20_000).asReversed())
+            } catch (e: Exception) {
+                api.logging().logToError("BurpMCP-Ultra: proxy index persistence failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun submitPersistence(operation: () -> Unit) {
+        try {
+            persistenceExecutor.execute(operation)
+        } catch (_: RejectedExecutionException) {
+            droppedPersistenceWrites.incrementAndGet()
+        }
+    }
+
+    private fun loadCapturePolicy(): HistoryCapturePolicy = HistoryCapturePolicy.normalized(
+        enabled = preferenceBoolean("mcp_proxy_index_capture_enabled", true),
+        inScopeOnly = preferenceBoolean("mcp_proxy_index_scope_only", false),
+        includeHosts = preferenceList("mcp_proxy_index_include_hosts"),
+        excludeHosts = preferenceList("mcp_proxy_index_exclude_hosts"),
+        excludeExtensions = preferenceList("mcp_proxy_index_exclude_extensions")
+    )
+
+    private fun preferenceBoolean(key: String, default: Boolean): Boolean =
+        try { preferences.getBoolean(key) ?: default } catch (_: Exception) { default }
+
+    private fun preferenceList(key: String): List<String> =
+        try { preferences.getString(key)?.split(',')?.map(String::trim)?.filter(String::isNotEmpty) ?: emptyList() }
+        catch (_: Exception) { emptyList() }
+
+    private fun historyStatus(item: ProxyHttpRequestResponse): Int? =
+        if (!item.hasResponse()) null else try { item.response().statusCode().toInt() } catch (_: Exception) { null }
+
+    private fun cappedMessageText(bytes: burp.api.montoya.core.ByteArray, maxBytes: Int = 32_000): String {
+        val end = bytes.length().coerceAtMost(maxBytes)
+        return BodyText.stripLoneSurrogates(bytes.subArray(0, end).toString())
     }
 
     /**

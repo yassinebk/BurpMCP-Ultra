@@ -78,7 +78,7 @@ object ProxyTools {
         // ---------------------------------------------------------------
         server.addTool(
             name = "proxy_history_search",
-            description = "Search proxy history using a regex pattern. Can search in request, response, or both. Returns matching history entries.",
+            description = "Bounded regex search over proxy history. Stops at hard scan/result/time limits and returns compact matching rows with continuation cursors.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
                     putJsonObject("pattern") { put("type", "string"); put("description", "Regex pattern to search for") }
@@ -86,9 +86,10 @@ object ProxyTools {
                     putJsonObject("case_sensitive") { put("type", "boolean"); put("description", "Case-sensitive matching (default false)") }
                     putJsonObject("max_results") { put("type", "integer"); put("description", "Maximum number of results (default 100)") }
                     putJsonObject("in_scope_only") { put("type", "boolean"); put("description", "Restrict to in-scope items (default false)") }
-                    putJsonObject("include_request") { put("type", "boolean"); put("description", "Include full request text (default false)") }
-                    putJsonObject("include_response") { put("type", "boolean"); put("description", "Include full response text (default false)") }
-                    putJsonObject("max_response_length") { put("type", "integer"); put("description", "Truncate response text to this length") }
+                    putJsonObject("before_id") { put("type", "integer"); put("description", "Return and scan ids lower than this cursor") }
+                    putJsonObject("after_id") { put("type", "integer"); put("description", "Return and scan ids higher than this cursor") }
+                    putJsonObject("scan_limit") { put("type", "integer"); put("description", "Maximum entries inspected, 1-10000 (default 1000)") }
+                    putJsonObject("time_budget_ms") { put("type", "integer"); put("description", "Wall-clock budget, 100-15000ms (default 3000)") }
                 },
                 required = listOf("pattern")
             )
@@ -108,13 +109,16 @@ object ProxyTools {
                 val caseSensitive = args["case_sensitive"]?.jsonPrimitive?.booleanOrNull ?: false
                 val maxResults = args["max_results"]?.jsonPrimitive?.intOrNull ?: 100
                 val inScopeOnly = args["in_scope_only"]?.jsonPrimitive?.booleanOrNull ?: false
-                val includeRequest = args["include_request"]?.jsonPrimitive?.booleanOrNull ?: false
-                val includeResponse = args["include_response"]?.jsonPrimitive?.booleanOrNull ?: false
-                val maxResponseLength = args["max_response_length"]?.jsonPrimitive?.intOrNull
-
-                val result = bridge.searchHistory(
-                    pattern, searchIn, caseSensitive, maxResults, inScopeOnly,
-                    includeRequest, includeResponse, maxResponseLength
+                val result = bridge.searchHistoryBounded(
+                    pattern = pattern,
+                    searchIn = searchIn,
+                    caseSensitive = caseSensitive,
+                    beforeId = args["before_id"]?.jsonPrimitive?.intOrNull,
+                    afterId = args["after_id"]?.jsonPrimitive?.intOrNull,
+                    scanLimit = args["scan_limit"]?.jsonPrimitive?.intOrNull ?: 1_000,
+                    maxResults = maxResults,
+                    timeBudgetMs = args["time_budget_ms"]?.jsonPrimitive?.longOrNull ?: 3_000L,
+                    inScopeOnly = inScopeOnly
                 )
                 CallToolResult(content = listOf(TextContent(result.toString())))
             } catch (e: Exception) {
@@ -125,6 +129,260 @@ object ProxyTools {
                     isError = true
                 )
             }
+        }
+
+        server.addTool(
+            name = "proxy_history_summary",
+            description = "Compact newest-first proxy history page. Returns metadata only and uses exclusive Burp-id cursors.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("before_id") { put("type", "integer"); put("description", "Return ids lower than this cursor") }
+                    putJsonObject("after_id") { put("type", "integer"); put("description", "Return ids higher than this cursor") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "Page size, 1-1000 (default 100)") }
+                    putJsonObject("host") { put("type", "string"); put("description", "Case-insensitive host substring") }
+                    putJsonObject("method") { put("type", "string") }
+                    putJsonObject("status_code") { put("type", "integer") }
+                    putJsonObject("in_scope_only") { put("type", "boolean") }
+                },
+                required = emptyList()
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val result = bridge.getHistorySummary(
+                args["before_id"]?.jsonPrimitive?.intOrNull,
+                args["after_id"]?.jsonPrimitive?.intOrNull,
+                args["limit"]?.jsonPrimitive?.intOrNull ?: 100,
+                args["host"]?.jsonPrimitive?.contentOrNull,
+                args["method"]?.jsonPrimitive?.contentOrNull,
+                args["status_code"]?.jsonPrimitive?.intOrNull,
+                args["in_scope_only"]?.jsonPrimitive?.booleanOrNull ?: false
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_history_entry",
+            description = "Retrieve one full proxy history request/response by its stable Burp id.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("id") { put("type", "integer") }
+                    putJsonObject("max_message_length") { put("type", "integer"); put("description", "Per-message text cap (default 200000)") }
+                },
+                required = listOf("id")
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val id = args["id"]?.jsonPrimitive?.intOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: id\"" + "}")), isError = true)
+            val result = bridge.getHistoryEntry(id, args["max_message_length"]?.jsonPrimitive?.intOrNull)
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_history_search_bounded",
+            description = "Search a newest-first Burp history window with hard scan, match, regex, and wall-clock limits. Use next_before_id to continue.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("pattern") { put("type", "string") }
+                    putJsonObject("search_in") { put("type", "string"); put("description", "url, request, response, or both") }
+                    putJsonObject("case_sensitive") { put("type", "boolean") }
+                    putJsonObject("before_id") { put("type", "integer") }
+                    putJsonObject("after_id") { put("type", "integer") }
+                    putJsonObject("scan_limit") { put("type", "integer"); put("description", "Maximum entries inspected, 1-10000 (default 1000)") }
+                    putJsonObject("max_results") { put("type", "integer"); put("description", "Maximum matches, 1-200 (default 50)") }
+                    putJsonObject("time_budget_ms") { put("type", "integer"); put("description", "Wall-clock budget, 100-15000ms (default 3000)") }
+                    putJsonObject("in_scope_only") { put("type", "boolean") }
+                },
+                required = listOf("pattern")
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val pattern = args["pattern"]?.jsonPrimitive?.contentOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: pattern\"" + "}")), isError = true)
+            val result = bridge.searchHistoryBounded(
+                pattern,
+                args["search_in"]?.jsonPrimitive?.contentOrNull ?: "both",
+                args["case_sensitive"]?.jsonPrimitive?.booleanOrNull ?: false,
+                args["before_id"]?.jsonPrimitive?.intOrNull,
+                args["after_id"]?.jsonPrimitive?.intOrNull,
+                args["scan_limit"]?.jsonPrimitive?.intOrNull ?: 1_000,
+                args["max_results"]?.jsonPrimitive?.intOrNull ?: 50,
+                args["time_budget_ms"]?.jsonPrimitive?.longOrNull ?: 3_000L,
+                args["in_scope_only"]?.jsonPrimitive?.booleanOrNull ?: false
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_summary",
+            description = "Compact page from the bounded live index. Never reads Burp's project database and remains fast regardless of project size.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("before_message_id") { put("type", "integer") }
+                    putJsonObject("limit") { put("type", "integer"); put("description", "Page size, 1-1000 (default 100)") }
+                },
+                required = emptyList()
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val result = bridge.getLiveIndexSummary(
+                args["before_message_id"]?.jsonPrimitive?.intOrNull,
+                args["limit"]?.jsonPrimitive?.intOrNull ?: 100
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_entry",
+            description = "Get request/response text retained for one live-index message id.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject { putJsonObject("message_id") { put("type", "integer") } },
+                required = listOf("message_id")
+            )
+        ) { request ->
+            val id = request.params.arguments?.get("message_id")?.jsonPrimitive?.intOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: message_id\"" + "}")), isError = true)
+            CallToolResult(content = listOf(TextContent(bridge.getLiveIndexEntry(id).toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_search",
+            description = "Search the bounded live index without touching Burp history. Use next_before_message_id to continue.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("pattern") { put("type", "string") }
+                    putJsonObject("search_in") { put("type", "string"); put("description", "url, request, response, or both") }
+                    putJsonObject("case_sensitive") { put("type", "boolean") }
+                    putJsonObject("before_message_id") { put("type", "integer") }
+                    putJsonObject("scan_limit") { put("type", "integer") }
+                    putJsonObject("max_results") { put("type", "integer") }
+                    putJsonObject("time_budget_ms") { put("type", "integer") }
+                },
+                required = listOf("pattern")
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val pattern = args["pattern"]?.jsonPrimitive?.contentOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: pattern\"" + "}")), isError = true)
+            val result = bridge.searchLiveIndex(
+                pattern,
+                args["search_in"]?.jsonPrimitive?.contentOrNull ?: "both",
+                args["case_sensitive"]?.jsonPrimitive?.booleanOrNull ?: false,
+                args["before_message_id"]?.jsonPrimitive?.intOrNull,
+                args["scan_limit"]?.jsonPrimitive?.intOrNull ?: 1_000,
+                args["max_results"]?.jsonPrimitive?.intOrNull ?: 50,
+                args["time_budget_ms"]?.jsonPrimitive?.longOrNull ?: 3_000L
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_stats",
+            description = "Show live-index entry and memory bounds.",
+            inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList())
+        ) { _ -> CallToolResult(content = listOf(TextContent(bridge.getLiveIndexStats().toString()))) }
+
+        server.addTool(
+            name = "proxy_index_clear",
+            description = "Clear only BurpMCP-Ultra's bounded live index. Does not modify Burp proxy history or the project database.",
+            inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList())
+        ) { _ -> CallToolResult(content = listOf(TextContent(bridge.clearLiveIndex().toString()))) }
+
+        server.addTool(
+            name = "proxy_index_policy_get",
+            description = "Show live-index capture filters, sidecar persistence state, and redaction guarantees.",
+            inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList())
+        ) { _ -> CallToolResult(content = listOf(TextContent(bridge.getIndexPolicy().toString()))) }
+
+        server.addTool(
+            name = "proxy_index_policy_set",
+            description = "Configure bounded live capture and optional redacted per-project sidecar persistence. Omitted fields keep their current values.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("capture_enabled") { put("type", "boolean") }
+                    putJsonObject("in_scope_only") { put("type", "boolean") }
+                    putJsonObject("include_hosts") { put("type", "array"); putJsonObject("items") { put("type", "string") } }
+                    putJsonObject("exclude_hosts") { put("type", "array"); putJsonObject("items") { put("type", "string") } }
+                    putJsonObject("exclude_extensions") { put("type", "array"); putJsonObject("items") { put("type", "string") } }
+                    putJsonObject("persistence_enabled") { put("type", "boolean") }
+                },
+                required = emptyList()
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            fun strings(name: String): List<String>? = args[name]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            val result = bridge.configureIndexPolicy(
+                args["capture_enabled"]?.jsonPrimitive?.booleanOrNull,
+                args["in_scope_only"]?.jsonPrimitive?.booleanOrNull,
+                strings("include_hosts"),
+                strings("exclude_hosts"),
+                strings("exclude_extensions"),
+                args["persistence_enabled"]?.jsonPrimitive?.booleanOrNull
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_persistence_clear",
+            description = "Delete only the current project's redacted BurpMCP-Ultra sidecar index. The in-memory index and native Burp history are not modified.",
+            inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList())
+        ) { _ -> CallToolResult(content = listOf(TextContent(bridge.clearPersistentIndex().toString()))) }
+
+        server.addTool(
+            name = "proxy_index_search_start",
+            description = "Start a cancellable background search of the bounded index and immediately return a job id.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("pattern") { put("type", "string") }
+                    putJsonObject("search_in") { put("type", "string") }
+                    putJsonObject("case_sensitive") { put("type", "boolean") }
+                    putJsonObject("before_message_id") { put("type", "integer") }
+                    putJsonObject("scan_limit") { put("type", "integer") }
+                    putJsonObject("max_results") { put("type", "integer") }
+                    putJsonObject("time_budget_ms") { put("type", "integer") }
+                },
+                required = listOf("pattern")
+            )
+        ) { request ->
+            val args = request.params.arguments ?: emptyMap()
+            val pattern = args["pattern"]?.jsonPrimitive?.contentOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: pattern\"}")), isError = true)
+            val result = bridge.startLiveIndexSearchJob(
+                pattern,
+                args["search_in"]?.jsonPrimitive?.contentOrNull ?: "both",
+                args["case_sensitive"]?.jsonPrimitive?.booleanOrNull ?: false,
+                args["before_message_id"]?.jsonPrimitive?.intOrNull,
+                args["scan_limit"]?.jsonPrimitive?.intOrNull ?: 10_000,
+                args["max_results"]?.jsonPrimitive?.intOrNull ?: 100,
+                args["time_budget_ms"]?.jsonPrimitive?.longOrNull ?: 15_000L
+            )
+            CallToolResult(content = listOf(TextContent(result.toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_search_job",
+            description = "Read the status and result of a background index search.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject { putJsonObject("job_id") { put("type", "string") } },
+                required = listOf("job_id")
+            )
+        ) { request ->
+            val id = request.params.arguments?.get("job_id")?.jsonPrimitive?.contentOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: job_id\"}")), isError = true)
+            CallToolResult(content = listOf(TextContent(bridge.getSearchJob(id).toString())))
+        }
+
+        server.addTool(
+            name = "proxy_index_search_cancel",
+            description = "Cancel a queued or running background index search.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject { putJsonObject("job_id") { put("type", "string") } },
+                required = listOf("job_id")
+            )
+        ) { request ->
+            val id = request.params.arguments?.get("job_id")?.jsonPrimitive?.contentOrNull
+                ?: return@addTool CallToolResult(listOf(TextContent("{\"error\":\"Missing required parameter: job_id\"}")), isError = true)
+            CallToolResult(content = listOf(TextContent(bridge.cancelSearchJob(id).toString())))
         }
 
         // ---------------------------------------------------------------
