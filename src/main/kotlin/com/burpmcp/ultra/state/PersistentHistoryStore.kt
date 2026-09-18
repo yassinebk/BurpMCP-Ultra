@@ -40,6 +40,7 @@ class PersistentHistoryStore(
 
     @Synchronized
     fun compact(entriesOldestFirst: List<LiveHistoryIndex.Entry>, force: Boolean = false): Boolean {
+        if (entriesOldestFirst.isEmpty() && Files.exists(file) && Files.size(file) > 0L) return false
         if (!force && (!Files.exists(file) || Files.size(file) <= maxFileBytes)) return false
         ensureParent()
         val temporary = file.resolveSibling(file.fileName.toString() + ".tmp")

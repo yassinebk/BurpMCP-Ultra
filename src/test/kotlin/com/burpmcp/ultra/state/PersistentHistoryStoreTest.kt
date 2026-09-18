@@ -46,6 +46,21 @@ class PersistentHistoryStoreTest {
         }
     }
 
+    @Test fun `forced compaction cannot erase a nonempty sidecar from an empty live snapshot`() {
+        val directory = Files.createTempDirectory("burpmcp-history-test")
+        try {
+            val file = directory.resolve("index.jsonl")
+            val store = PersistentHistoryStore(file, maxFileBytes = 1)
+            store.append(entry(1, "one", null))
+            val before = file.readText()
+
+            assertFalse(store.compact(emptyList(), force = true))
+            assertEquals(before, file.readText())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     private fun entry(id: Int, request: String, response: String?) = LiveHistoryIndex.Entry(
         messageId = id,
         method = "GET",
