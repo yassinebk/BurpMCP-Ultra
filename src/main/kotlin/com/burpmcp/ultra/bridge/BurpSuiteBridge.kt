@@ -153,4 +153,8 @@ class BurpSuiteBridge(private val api: MontoyaApi) {
      */
     fun destructiveAllowed(): Boolean =
         try { api.persistence().preferences().getBoolean("mcp_allow_destructive") ?: false } catch (_: Exception) { false }
+
+    /** Operator-only opt-in for tools that register or execute supplied code. */
+    fun execAllowed(): Boolean =
+        try { api.persistence().preferences().getBoolean("mcp_allow_exec") ?: false } catch (_: Exception) { false }
 }

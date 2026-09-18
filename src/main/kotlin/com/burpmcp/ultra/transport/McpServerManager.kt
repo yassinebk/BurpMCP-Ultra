@@ -95,6 +95,17 @@ class McpServerManager(
 
         // Register all tools and resources on this server instance
         ToolRegistry.registerAll(server, bridges, eventBus, stateManager)
+        ToolSafety.wrapAll(
+            server,
+            destructiveAllowed = bridges.burpSuite::destructiveAllowed,
+            execAllowed = bridges.burpSuite::execAllowed
+        )
+        CompactToolSurface.apply(
+            server,
+            profile = ToolProfile.resolve(),
+            destructiveAllowed = bridges.burpSuite::destructiveAllowed,
+            execAllowed = bridges.burpSuite::execAllowed
+        )
         ResourceRegistry.registerAll(server, bridges, eventBus, stateManager)
 
         // Wrap all tools to emit tool.called events for dashboard + native UI visibility

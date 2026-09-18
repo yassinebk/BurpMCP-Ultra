@@ -17,8 +17,8 @@ import kotlinx.serialization.json.put
  * WARN-mode flag. Funnelling every send through this one place keeps the policy
  * uniform and means a future send path cannot silently skip the gate.
  *
- * Fails open (allows) when scope cannot be evaluated, so a Burp quirk never
- * blocks legitimate work.
+ * ENFORCE mode fails closed when scope cannot be evaluated. WARN and OFF keep
+ * operating, with WARN returning an explicit evaluation warning.
  */
 class ScopeGate(private val api: MontoyaApi) {
 
@@ -32,7 +32,15 @@ class ScopeGate(private val api: MontoyaApi) {
     fun check(url: String): Check {
         val m = mode()
         if (m == ScopeMode.OFF) return Check(null, null)
-        val inScope = try { api.scope().isInScope(url) } catch (_: Exception) { return Check(null, null) }
+        val inScope = try {
+            api.scope().isInScope(url)
+        } catch (e: Exception) {
+            return if (m == ScopeMode.ENFORCE) {
+                Check(evaluationFailureJson(url, e.message), null)
+            } else {
+                Check(null, "scope_check_failed: ${e.message ?: "Burp could not evaluate target scope"}")
+            }
+        }
         return when (ScopePolicy.decide(m, inScope)) {
             ScopeDecision.DENY -> Check(denyJson(url), null)
             ScopeDecision.WARN -> Check(null, "out_of_scope: $url is not in Burp's target scope")
@@ -53,6 +61,14 @@ class ScopeGate(private val api: MontoyaApi) {
             put("out_of_scope", true)
             put("url", url)
             put("scope_mode", "enforce")
+        }
+
+        fun evaluationFailureJson(url: String, detail: String?): JsonObject = buildJsonObject {
+            put("error", "Blocked by scope policy because Burp could not determine whether the target is in scope.")
+            put("scope_check_failed", true)
+            put("url", url)
+            put("scope_mode", "enforce")
+            if (!detail.isNullOrBlank()) put("detail", detail)
         }
     }
 }

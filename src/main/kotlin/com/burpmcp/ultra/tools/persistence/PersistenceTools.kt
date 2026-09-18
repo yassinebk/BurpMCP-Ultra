@@ -153,7 +153,7 @@ object PersistenceTools {
                         isError = true
                     )
                 val result = bridge.preferenceStore(key, value)
-                CallToolResult(content = listOf(TextContent(result.toString())))
+                CallToolResult(content = listOf(TextContent(result.toString())), isError = result.containsKey("error"))
             } catch (e: Exception) {
                 CallToolResult(
                     content = listOf(TextContent("""{"error":"${e.message}"}""")),
@@ -183,7 +183,7 @@ object PersistenceTools {
                         isError = true
                     )
                 val result = bridge.preferenceGet(key)
-                CallToolResult(content = listOf(TextContent(result.toString())))
+                CallToolResult(content = listOf(TextContent(result.toString())), isError = result.containsKey("error"))
             } catch (e: Exception) {
                 CallToolResult(
                     content = listOf(TextContent("""{"error":"${e.message}"}""")),

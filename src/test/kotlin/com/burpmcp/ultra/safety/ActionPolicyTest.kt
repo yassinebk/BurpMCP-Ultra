@@ -12,6 +12,26 @@ class ActionPolicyTest {
         assertTrue(ActionPolicy.isDestructive("burp_import_project_config"))
         assertTrue(ActionPolicy.isDestructive("burp_import_user_config"))
         assertFalse(ActionPolicy.isDestructive("http_send_request"))
+        assertTrue(ActionPolicy.isDestructive("proxy_index_persistence_clear"))
+        assertTrue(ActionPolicy.isDestructive("scanner_task_delete"))
+    }
+
+    @Test
+    fun `classifies operator supplied code separately`() {
+        assertTrue(ActionPolicy.isExec("bambda_import"))
+        assertTrue(ActionPolicy.isExec("bcheck_import"))
+        assertTrue(ActionPolicy.isExec("scanner_import_bcheck"))
+        assertTrue(ActionPolicy.isExec("scancheck_create_active"))
+        assertFalse(ActionPolicy.isAllowed("bambda_import", allowDestructive = true, allowExec = false))
+        assertTrue(ActionPolicy.isAllowed("bambda_import", allowDestructive = false, allowExec = true))
+        assertTrue(ActionPolicy.isDestructive("scanner_unregister_check"))
+    }
+
+    @Test
+    fun `classifies observational tools as read only`() {
+        assertTrue(ActionPolicy.classify("proxy_index_stats") == ActionPolicy.Tier.READ)
+        assertTrue(ActionPolicy.classify("proxy_history_summary") == ActionPolicy.Tier.READ)
+        assertTrue(ActionPolicy.classify("http_send_request") == ActionPolicy.Tier.MUTATE)
     }
 
     @Test

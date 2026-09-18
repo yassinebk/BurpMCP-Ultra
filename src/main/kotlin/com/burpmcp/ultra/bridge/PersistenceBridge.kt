@@ -17,6 +17,9 @@ class PersistenceBridge(private val api: MontoyaApi) {
     companion object {
         private const val KEY_INDEX = "_burpmcp_keys"
         private const val KEY_SEPARATOR = "\u001F" // Unit separator
+
+        /** MCP policy, transport, token, and capture keys are operator-owned. */
+        fun isReservedPreferenceKey(key: String): Boolean = key.lowercase().startsWith("mcp_")
     }
 
     /** Shadow store mirroring what is in extensionData. */
@@ -119,6 +122,7 @@ class PersistenceBridge(private val api: MontoyaApi) {
      * Stores a preference value (user-level, survives across projects).
      */
     fun preferenceStore(key: String, value: String): JsonObject {
+        if (isReservedPreferenceKey(key)) return reservedPreferenceError(key)
         api.persistence().preferences().setString(key, value)
 
         return buildJsonObject {
@@ -133,6 +137,7 @@ class PersistenceBridge(private val api: MontoyaApi) {
      * Retrieves a preference value.
      */
     fun preferenceGet(key: String): JsonObject {
+        if (isReservedPreferenceKey(key)) return reservedPreferenceError(key)
         val value = try {
             api.persistence().preferences().getString(key)
         } catch (_: Exception) {
@@ -147,5 +152,11 @@ class PersistenceBridge(private val api: MontoyaApi) {
                 put("value", value)
             }
         }
+    }
+
+    private fun reservedPreferenceError(key: String): JsonObject = buildJsonObject {
+        put("error", "Preference '$key' is operator-owned and unavailable through MCP persistence tools")
+        put("key", key)
+        put("reserved", true)
     }
 }

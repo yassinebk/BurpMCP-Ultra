@@ -1319,8 +1319,59 @@ class BurpMcpUltraTab(
         gbc.gridy = 9; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
 
-        // MCP config
         gbc.gridy = 10; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(JLabel("MCP Safety Policy").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
+        gbc.gridwidth = 1
+
+        val preferences = api.persistence().preferences()
+        val destructiveInitiallyAllowed =
+            try { preferences.getBoolean("mcp_allow_destructive") ?: false } catch (_: Exception) { false }
+        val execInitiallyAllowed =
+            try { preferences.getBoolean("mcp_allow_exec") ?: false } catch (_: Exception) { false }
+        val allowDestructiveCheck = JCheckBox("Allow destructive actions (clear, delete, shutdown, config import)")
+        allowDestructiveCheck.isSelected = destructiveInitiallyAllowed
+        gbc.gridy = 11; gbc.gridx = 0; gbc.gridwidth = 2; gbc.weightx = 1.0
+        content.add(allowDestructiveCheck, gbc)
+
+        val allowExecCheck = JCheckBox("Allow privileged execution (Bambda, custom checks, AI prompt)")
+        allowExecCheck.isSelected = execInitiallyAllowed
+        gbc.gridy = 12
+        content.add(allowExecCheck, gbc); gbc.gridwidth = 1
+
+        val saveSafetyPolicyBtn = JButton("Save Safety Policy")
+        saveSafetyPolicyBtn.addActionListener {
+            val destructiveCurrentlyAllowed =
+                try { preferences.getBoolean("mcp_allow_destructive") ?: false } catch (_: Exception) { false }
+            val execCurrentlyAllowed =
+                try { preferences.getBoolean("mcp_allow_exec") ?: false } catch (_: Exception) { false }
+            val newlyEnabled = buildList {
+                if (allowDestructiveCheck.isSelected && !destructiveCurrentlyAllowed) add("destructive actions")
+                if (allowExecCheck.isSelected && !execCurrentlyAllowed) add("supplied-code execution")
+            }
+            if (newlyEnabled.isNotEmpty()) {
+                val ok = JOptionPane.showConfirmDialog(
+                    panel,
+                    "Enable ${newlyEnabled.joinToString(" and ")} for MCP clients?\n\n" +
+                        "Compact-profile calls will still require confirm=true. These settings take effect immediately.",
+                    "Confirm MCP safety policy", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
+                )
+                if (ok != JOptionPane.YES_OPTION) return@addActionListener
+            }
+            preferences.setBoolean("mcp_allow_destructive", allowDestructiveCheck.isSelected)
+            preferences.setBoolean("mcp_allow_exec", allowExecCheck.isSelected)
+            JOptionPane.showMessageDialog(
+                panel, "MCP safety policy saved. No extension reload is needed.",
+                "BurpMCP-Ultra", JOptionPane.INFORMATION_MESSAGE
+            )
+        }
+        gbc.gridy = 13; gbc.gridx = 1; gbc.weightx = 0.0
+        content.add(saveSafetyPolicyBtn, gbc)
+
+        gbc.gridy = 14; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(JSeparator(), gbc); gbc.gridwidth = 1
+
+        // MCP config
+        gbc.gridy = 15; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JLabel("MCP Client Config").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
@@ -1328,18 +1379,18 @@ class BurpMcpUltraTab(
         val configArea = serverConfigArea
         configArea.isEditable = false; configArea.font = Font("Monospaced", Font.PLAIN, 11)
         configArea.lineWrap = true; configArea.wrapStyleWord = false; configArea.rows = 3
-        gbc.gridy = 11; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 16; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(configArea, gbc)
         val copyConfigBtn = JButton("Copy Config")
         copyConfigBtn.addActionListener { copyToClipboard(configArea.text) }
-        gbc.gridy = 12; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
+        gbc.gridy = 17; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
         content.add(copyConfigBtn, gbc)
         gbc.gridwidth = 1
 
         // Header-less clients (GitHub issue #11): some MCP clients accept only a URL and cannot
         // send an Authorization header. The token rides in the URL PATH — the only URL-borne
         // carrier that survives onto the SSE back-channel POST (a "?token=" query is dropped).
-        gbc.gridy = 13; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 18; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(
             JLabel("If your MCP client cannot set headers — token in the URL path (keep the trailing slash):")
                 .apply { font = font.deriveFont(Font.ITALIC, 11f) },
@@ -1351,31 +1402,31 @@ class BurpMcpUltraTab(
         val pathConfigArea = serverPathConfigArea
         pathConfigArea.isEditable = false; pathConfigArea.font = Font("Monospaced", Font.PLAIN, 11)
         pathConfigArea.lineWrap = true; pathConfigArea.wrapStyleWord = false; pathConfigArea.rows = 3
-        gbc.gridy = 14; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 19; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(pathConfigArea, gbc)
         val copyPathConfigBtn = JButton("Copy No-Headers Config")
         copyPathConfigBtn.addActionListener { copyToClipboard(pathConfigArea.text) }
-        gbc.gridy = 15; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
+        gbc.gridy = 20; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
         content.add(copyPathConfigBtn, gbc)
         gbc.gridwidth = 1
 
-        gbc.gridy = 16; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 21; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
 
         // Live stats
-        gbc.gridy = 17; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 22; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JLabel("Live Statistics").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        serverUptimeLabel = JLabel("00:00:00"); addRow(18, "Uptime:", serverUptimeLabel)
-        serverToolCallsLabel = JLabel("0"); addRow(19, "Total MCP Tool Calls:", serverToolCallsLabel)
-        serverEventsLabel = JLabel("0"); addRow(20, "Event Buffer:", serverEventsLabel)
-        serverWsLabel = JLabel("0"); addRow(21, "WebSocket Connections:", serverWsLabel)
-        serverCollabLabel = JLabel("0"); addRow(22, "Collaborator Clients:", serverCollabLabel)
-        serverScanLabel = JLabel("0"); addRow(23, "Active Scan Tasks:", serverScanLabel)
+        serverUptimeLabel = JLabel("00:00:00"); addRow(23, "Uptime:", serverUptimeLabel)
+        serverToolCallsLabel = JLabel("0"); addRow(24, "Total MCP Tool Calls:", serverToolCallsLabel)
+        serverEventsLabel = JLabel("0"); addRow(25, "Event Buffer:", serverEventsLabel)
+        serverWsLabel = JLabel("0"); addRow(26, "WebSocket Connections:", serverWsLabel)
+        serverCollabLabel = JLabel("0"); addRow(27, "Collaborator Clients:", serverCollabLabel)
+        serverScanLabel = JLabel("0"); addRow(28, "Active Scan Tasks:", serverScanLabel)
 
         // Filler
-        gbc.gridy = 24; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
+        gbc.gridy = 29; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
         content.add(JLabel(), gbc)
 
         panel.add(JScrollPane(content), BorderLayout.CENTER)

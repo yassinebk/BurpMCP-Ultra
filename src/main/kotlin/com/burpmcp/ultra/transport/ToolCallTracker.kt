@@ -33,13 +33,14 @@ object ToolCallTracker {
                 handler = { request: CallToolRequest ->
                     val startTime = System.nanoTime()
                     val startInstant = Instant.now()
+                    val trackedName = request.params.arguments?.get("action")?.jsonPrimitive?.contentOrNull ?: toolName
 
                     val result: CallToolResult = originalHandler.invoke(request)
 
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
 
                     try {
-                        recordToolCall(eventBus, stateManager, toolName, request, result, elapsedMs, startInstant)
+                        recordToolCall(eventBus, stateManager, trackedName, request, result, elapsedMs, startInstant)
                     } catch (_: Exception) {}
 
                     result
