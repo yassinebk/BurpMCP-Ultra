@@ -56,6 +56,16 @@ class EventsBufferBoundsTest {
         assertEquals(listOf(4L, 5L, 6L), bus.getEvents(sinceId = 3, maxEvents = 3).map { it.id })
     }
 
+    @Test fun `event buffer evicts oldest entries and keeps an exact size`() {
+        val bus = EventBus(maxBufferSize = 3)
+        seed(bus, 5)
+
+        assertEquals(3, bus.size())
+        assertEquals(listOf(3L, 4L, 5L), bus.getEvents(maxEvents = 10).map { it.id })
+        bus.clear()
+        assertEquals(0, bus.size())
+    }
+
     // --- EventBus.getEventsByType ------------------------------------------
 
     @Test fun `getEventsByType with negative maxEvents returns empty list, no exception`() {

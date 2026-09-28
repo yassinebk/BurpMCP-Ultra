@@ -13,14 +13,21 @@ class PersistentHistoryStore(
     data class Stats(val path: String, val exists: Boolean, val bytes: Long, val maxBytes: Long)
 
     private val json = Json { ignoreUnknownKeys = true }
+    private var permissionsRestricted = false
 
     @Synchronized
     fun append(entry: LiveHistoryIndex.Entry) {
         ensureParent()
         val line = serialize(redact(entry)) + "\n"
         Files.writeString(file, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
-        restrictPermissions()
+        if (!permissionsRestricted) {
+            restrictPermissions()
+            permissionsRestricted = true
+        }
     }
+
+    @Synchronized
+    fun needsCompaction(): Boolean = Files.exists(file) && Files.size(file) > maxFileBytes
 
     @Synchronized
     fun load(maxEntries: Int): List<LiveHistoryIndex.Entry> {
@@ -41,7 +48,7 @@ class PersistentHistoryStore(
     @Synchronized
     fun compact(entriesOldestFirst: List<LiveHistoryIndex.Entry>, force: Boolean = false): Boolean {
         if (entriesOldestFirst.isEmpty() && Files.exists(file) && Files.size(file) > 0L) return false
-        if (!force && (!Files.exists(file) || Files.size(file) <= maxFileBytes)) return false
+        if (!force && !needsCompaction()) return false
         ensureParent()
         val temporary = file.resolveSibling(file.fileName.toString() + ".tmp")
         Files.newBufferedWriter(temporary).use { writer ->
@@ -55,11 +62,16 @@ class PersistentHistoryStore(
             Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         }
         restrictPermissions()
+        permissionsRestricted = true
         return true
     }
 
     @Synchronized
-    fun clear(): Boolean = !Files.exists(file) || Files.deleteIfExists(file)
+    fun clear(): Boolean {
+        val cleared = !Files.exists(file) || Files.deleteIfExists(file)
+        if (cleared) permissionsRestricted = false
+        return cleared
+    }
 
     fun stats(): Stats {
         val exists = Files.exists(file)

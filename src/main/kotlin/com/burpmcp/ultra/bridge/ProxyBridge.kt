@@ -568,7 +568,7 @@ class ProxyBridge(
         persistenceExecutor.shutdown()
         try { persistenceExecutor.awaitTermination(2, TimeUnit.SECONDS) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
         if (persistenceEnabled) {
-            try { persistentHistoryStore.compact(liveHistoryIndex.newest(limit = 20_000).asReversed(), force = true) } catch (_: Exception) { }
+            try { persistentHistoryStore.compact(liveHistoryIndex.snapshotOldestFirst(), force = true) } catch (_: Exception) { }
         }
     }
 
@@ -843,13 +843,16 @@ class ProxyBridge(
     fun createResponseHandler(): ProxyResponseHandler {
         return object : ProxyResponseHandler {
             override fun handleResponseReceived(interceptedResponse: InterceptedResponse): ProxyResponseReceivedAction {
-                liveHistoryIndex.recordResponse(
-                    messageId = interceptedResponse.messageId(),
-                    rawResponse = cappedMessageText(interceptedResponse.toByteArray()),
-                    statusCode = interceptedResponse.statusCode().toInt(),
-                    mimeType = try { interceptedResponse.mimeType().name } catch (_: Exception) { null }
-                )
-                persistSnapshot(interceptedResponse.messageId())
+                val messageId = interceptedResponse.messageId()
+                if (liveHistoryIndex.contains(messageId)) {
+                    liveHistoryIndex.recordResponse(
+                        messageId = messageId,
+                        rawResponse = cappedMessageText(interceptedResponse.toByteArray()),
+                        statusCode = interceptedResponse.statusCode().toInt(),
+                        mimeType = try { interceptedResponse.mimeType().name } catch (_: Exception) { null }
+                    )
+                    persistSnapshot(messageId)
+                }
                 // Emit event for every response passing through the proxy
                 emitResponseEvent(interceptedResponse)
 
@@ -1310,7 +1313,9 @@ class ProxyBridge(
             if (!persistenceEnabled) return@submitPersistence
             try {
                 persistentHistoryStore.append(snapshot)
-                persistentHistoryStore.compact(liveHistoryIndex.newest(limit = 20_000).asReversed())
+                if (persistentHistoryStore.needsCompaction()) {
+                    persistentHistoryStore.compact(liveHistoryIndex.snapshotOldestFirst(), force = true)
+                }
             } catch (e: Exception) {
                 api.logging().logToError("BurpMCP-Ultra: proxy index persistence failed: ${e.message}")
             }
@@ -1327,7 +1332,7 @@ class ProxyBridge(
 
     private fun loadCapturePolicy(): HistoryCapturePolicy = HistoryCapturePolicy.normalized(
         enabled = preferenceBoolean("mcp_proxy_index_capture_enabled", true),
-        inScopeOnly = preferenceBoolean("mcp_proxy_index_scope_only", false),
+        inScopeOnly = preferenceBoolean("mcp_proxy_index_scope_only", true),
         includeHosts = preferenceList("mcp_proxy_index_include_hosts"),
         excludeHosts = preferenceList("mcp_proxy_index_exclude_hosts"),
         excludeExtensions = preferenceList("mcp_proxy_index_exclude_extensions")

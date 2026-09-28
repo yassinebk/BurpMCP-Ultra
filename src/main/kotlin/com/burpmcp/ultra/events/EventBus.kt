@@ -39,6 +39,8 @@ data class BurpEvent(
  */
 class EventBus(private val maxBufferSize: Int = 10000) {
     private val buffer = ConcurrentLinkedDeque<BurpEvent>()
+    private val bufferLock = Any()
+    private var bufferSize = 0
     private val idCounter = AtomicLong(0)
     private val subscribers = CopyOnWriteArrayList<EventSubscriber>()
 
@@ -57,11 +59,13 @@ class EventBus(private val maxBufferSize: Int = 10000) {
             data = data
         )
 
-        buffer.addLast(event)
-
-        // Evict oldest events when the buffer exceeds capacity
-        while (buffer.size > maxBufferSize) {
-            buffer.pollFirst()
+        synchronized(bufferLock) {
+            buffer.addLast(event)
+            bufferSize++
+            while (bufferSize > maxBufferSize) {
+                if (buffer.pollFirst() == null) break
+                bufferSize--
+            }
         }
 
         // Notify matching subscribers (type filter is empty == wildcard)
@@ -83,7 +87,8 @@ class EventBus(private val maxBufferSize: Int = 10000) {
     fun getEvents(sinceId: Long = 0, maxEvents: Int = 200): List<BurpEvent> {
         // Clamp to a non-negative, bounded ceiling so a hostile/negative
         // maxEvents can never trip Iterable.take()'s require(n >= 0).
-        return buffer.filter { it.id > sinceId }.take(maxEvents.coerceIn(0, maxBufferSize))
+        return buffer.asSequence().filter { it.id > sinceId }
+            .take(maxEvents.coerceIn(0, maxBufferSize)).toList()
     }
 
     /**
@@ -97,7 +102,8 @@ class EventBus(private val maxBufferSize: Int = 10000) {
     ): List<BurpEvent> {
         // Clamp to a non-negative, bounded ceiling so a hostile/negative
         // maxEvents can never trip Iterable.take()'s require(n >= 0).
-        return buffer.filter { it.id > sinceId && it.type in types }.take(maxEvents.coerceIn(0, maxBufferSize))
+        return buffer.asSequence().filter { it.id > sinceId && it.type in types }
+            .take(maxEvents.coerceIn(0, maxBufferSize)).toList()
     }
 
     /**
@@ -124,12 +130,15 @@ class EventBus(private val maxBufferSize: Int = 10000) {
      * extension unload.
      */
     fun clear() {
-        buffer.clear()
+        synchronized(bufferLock) {
+            buffer.clear()
+            bufferSize = 0
+        }
         subscribers.clear()
     }
 
     /** Number of events currently in the buffer. */
-    fun size(): Int = buffer.size
+    fun size(): Int = synchronized(bufferLock) { bufferSize }
 
     /** The id of the most recently emitted event (0 if none). */
     fun lastId(): Long = idCounter.get()

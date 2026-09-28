@@ -100,6 +100,12 @@ class LiveHistoryIndex(
 
     fun get(messageId: Int): Entry? = entries[messageId]
 
+    fun contains(messageId: Int): Boolean = entries.containsKey(messageId)
+
+    fun snapshotOldestFirst(): List<Entry> = synchronized(lock) {
+        order.mapNotNull(entries::get)
+    }
+
     fun restore(entry: Entry) {
         synchronized(lock) {
             val previous = entries[entry.messageId]

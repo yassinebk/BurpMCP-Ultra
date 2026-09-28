@@ -5,6 +5,12 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class HistoryCapturePolicyTest {
+    @Test fun `capture defaults to in-scope traffic`() {
+        val policy = HistoryCapturePolicy()
+        assertFalse(policy.accepts("example.com", "https://example.com/", false))
+        assertTrue(policy.accepts("example.com", "https://example.com/", true))
+    }
+
     @Test fun `host and extension filters are applied together`() {
         val policy = HistoryCapturePolicy.normalized(
             enabled = true,

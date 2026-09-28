@@ -46,6 +46,18 @@ class PersistentHistoryStoreTest {
         }
     }
 
+    @Test fun `compaction threshold can be checked before building a snapshot`() {
+        val directory = Files.createTempDirectory("burpmcp-history-test")
+        try {
+            val store = PersistentHistoryStore(directory.resolve("index.jsonl"), maxFileBytes = 1)
+            assertFalse(store.needsCompaction())
+            store.append(entry(1, "one", null))
+            assertTrue(store.needsCompaction())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun `forced compaction cannot erase a nonempty sidecar from an empty live snapshot`() {
         val directory = Files.createTempDirectory("burpmcp-history-test")
         try {

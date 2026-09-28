@@ -2,7 +2,7 @@ package com.burpmcp.ultra.state
 
 data class HistoryCapturePolicy(
     val enabled: Boolean = true,
-    val inScopeOnly: Boolean = false,
+    val inScopeOnly: Boolean = true,
     val includeHosts: List<String> = emptyList(),
     val excludeHosts: List<String> = emptyList(),
     val excludeExtensions: Set<String> = emptySet()

@@ -2,6 +2,7 @@ package com.burpmcp.ultra.state
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -15,10 +16,18 @@ class LiveHistoryIndexTest {
 
     @Test fun `responses update their matching request`() {
         val index = LiveHistoryIndex()
+        assertFalse(index.contains(7))
         index.recordRequest(7, "POST", "https://x/a", "x", 443, true, "request")
+        assertTrue(index.contains(7))
         index.recordResponse(7, "response", 201, "JSON")
         assertEquals(201, index.get(7)?.statusCode)
         assertEquals("response", index.get(7)?.response)
+    }
+
+    @Test fun `snapshot preserves oldest-first order`() {
+        val index = LiveHistoryIndex()
+        repeat(3) { index.recordRequest(it, "GET", "https://x/$it", "x", 443, true, "r") }
+        assertEquals(listOf(0, 1, 2), index.snapshotOldestFirst().map { it.messageId })
     }
 
     @Test fun `large messages are capped`() {
